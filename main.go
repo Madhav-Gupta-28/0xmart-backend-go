@@ -1,9 +1,11 @@
 package main
 
 import (
-	"0xmart-backend-go/config"
-	"0xmart-backend-go/handlers"
 	"log"
+
+	"github.com/Madhav-Gupta-28/0xmart-backend-go/config"
+	"github.com/Madhav-Gupta-28/0xmart-backend-go/database"
+	"github.com/Madhav-Gupta-28/0xmart-backend-go/handlers"
 
 	"github.com/labstack/echo/v4"
 )
@@ -11,6 +13,12 @@ import (
 func main() {
 	// Load environment variables
 	config.LoadEnv()
+
+	// Connect to MongoDB
+	err := database.ConnectDB()
+	if err != nil {
+		log.Fatal("Failed to connect to MongoDB:", err)
+	}
 
 	// Create a new Echo instance
 	e := echo.New()
