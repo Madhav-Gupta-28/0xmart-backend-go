@@ -2,7 +2,6 @@ package utils
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"log"
 	"math/big"
@@ -34,9 +33,12 @@ func (b *BlockchainEventListener) Start() error {
 	websocketURL := os.Getenv("WEB3_WEBSOCKET_URL")
 	contractAddress := os.Getenv("CONTRACT_ADDRESS")
 
+	log.Printf("🔌 Connecting to WebSocket: %s", websocketURL)
+	log.Printf("📝 Watching contract: %s", contractAddress)
+
 	client, err := ethclient.Dial(websocketURL)
 	if err != nil {
-		log.Println("Failed to connect to the Ethereum client:", err)
+		log.Printf("❌ Failed to connect to Ethereum client: %v", err)
 		return err
 	}
 
@@ -50,11 +52,11 @@ func (b *BlockchainEventListener) Start() error {
 	logs := make(chan types.Log)
 	sub, err := b.client.SubscribeFilterLogs(context.Background(), query, logs)
 	if err != nil {
-		log.Printf("Failed to subscribe to contract events: %v", err)
+		log.Printf("❌ Failed to subscribe to contract events: %v", err)
 		return err
 	}
 
-	log.Printf("🎉 Successfully connected to contract at: %s", contractAddress)
+	log.Printf("✅ Successfully connected to contract")
 	log.Println("👂 Listening for contract events...")
 
 	go func() {
@@ -64,26 +66,33 @@ func (b *BlockchainEventListener) Start() error {
 				log.Printf("❌ Subscription error: %v", err)
 				b.Restart()
 			case vLog := <-logs:
+				log.Printf("📥 Received event: %+v", vLog)
+
 				// Parse the event data
 				tx := b.parseTransactionEvent(vLog)
 				if tx != nil {
+					log.Printf("📦 Parsed transaction: %+v", tx)
+
 					// Store in MongoDB
 					collection := database.DB.Collection("transactions")
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					_, err := collection.InsertOne(ctx, tx)
+					result, err := collection.InsertOne(ctx, tx)
 					cancel()
 
 					if err != nil {
-						log.Printf("Failed to store transaction: %v", err)
+						log.Printf("❌ Failed to store transaction: %v", err)
 						continue
 					}
 
-					log.Printf("\n✅ Stored New Transaction")
-					log.Printf("Order ID: %d", tx.OrderID)
-					log.Printf("Customer: %s", tx.CustomerAddress)
-					log.Printf("Amount: %s", tx.Amount)
-					log.Printf("Status: %s", tx.Status)
+					log.Printf("✅ Stored transaction with ID: %v", result.InsertedID)
+					log.Printf("📊 Transaction Details:")
+					log.Printf("   Order ID: %d", tx.OrderID)
+					log.Printf("   Customer: %s", tx.CustomerAddress)
+					log.Printf("   Amount: %s", tx.Amount)
+					log.Printf("   Status: %s", tx.Status)
 					log.Println("----------------------------------------")
+				} else {
+					log.Printf("⚠️ Failed to parse event data")
 				}
 			}
 		}
@@ -93,15 +102,29 @@ func (b *BlockchainEventListener) Start() error {
 }
 
 func (b *BlockchainEventListener) parseTransactionEvent(vLog types.Log) *models.Transaction {
-	// Assuming the event has orderId, customerAddress, and amount as parameters
-	if len(vLog.Data) < 96 { // 3 * 32 bytes for three parameters
+	log.Printf("🔍 Parsing event data")
+	log.Printf("📑 Event topics: %v", vLog.Topics)
+
+	// We need at least 4 topics: event signature and 3 indexed parameters
+	if len(vLog.Topics) < 4 {
+		log.Printf("⚠️ Not enough topics: %d", len(vLog.Topics))
 		return nil
 	}
 
-	// Parse the event data
-	orderID := new(big.Int).SetBytes(vLog.Data[:32]).Uint64()
-	customerAddress := common.BytesToAddress(vLog.Data[32:64]).Hex()
-	amount := hex.EncodeToString(vLog.Data[64:96])
+	// Parse from Topics instead of Data
+	// Topics[0] is event signature
+	// Topics[1] is customer address
+	// Topics[2] is order ID
+	// Topics[3] is amount
+
+	customerAddress := common.HexToAddress(vLog.Topics[1].Hex()).Hex()
+	orderID := new(big.Int).SetBytes(vLog.Topics[2][:]).Uint64()
+	amount := new(big.Int).SetBytes(vLog.Topics[3][:]).String()
+
+	log.Printf("📝 Parsed values:")
+	log.Printf("   Order ID: %d", orderID)
+	log.Printf("   Customer: %s", customerAddress)
+	log.Printf("   Amount: %s", amount)
 
 	return &models.Transaction{
 		OrderID:         orderID,
