@@ -177,3 +177,57 @@ func updateOrderStatus(ctx context.Context, orderID primitive.ObjectID, status m
 	)
 	return err
 }
+
+func GetOrders(c echo.Context) error {
+	userID := c.Get("userID").(primitive.ObjectID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var orders []models.Order
+	cursor, err := database.DB.Collection("orders").Find(ctx, bson.M{"userId": userID})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch orders"})
+	}
+	defer cursor.Close(ctx)
+
+	if err = cursor.All(ctx, &orders); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to decode orders"})
+	}
+
+	return c.JSON(http.StatusOK, orders)
+}
+
+// UpdateOrderFulfillment updates the order fulfillment status
+func UpdateOrderFulfillment(c echo.Context) error {
+	orderID := c.Param("orderId")
+	var req struct {
+		Status         models.FulfillmentStatus `json:"status"`
+		TrackingNumber string                   `json:"trackingNumber,omitempty"`
+	}
+
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
+	}
+
+	objID, _ := primitive.ObjectIDFromHex(orderID)
+	update := bson.M{
+		"$set": bson.M{
+			"fulfillmentStatus": req.Status,
+			"trackingNumber":    req.TrackingNumber,
+			"updatedAt":         time.Now(),
+		},
+	}
+
+	_, err := database.DB.Collection("orders").UpdateOne(
+		c.Request().Context(),
+		bson.M{"_id": objID},
+		update,
+	)
+
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})
+}

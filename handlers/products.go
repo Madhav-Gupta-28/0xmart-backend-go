@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Madhav-Gupta-28/0xmart-backend-go/database"
@@ -88,4 +89,120 @@ func GetOrderStatus(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": string(order.Status)})
+}
+
+// SearchProducts handles product search with filters
+func SearchProducts(c echo.Context) error {
+	query := c.QueryParam("q")
+	category := c.QueryParam("category")
+	minPrice := c.QueryParam("minPrice")
+	maxPrice := c.QueryParam("maxPrice")
+
+	filter := bson.M{}
+	if query != "" {
+		filter["$or"] = []bson.M{
+			{"name": bson.M{"$regex": query, "$options": "i"}},
+			{"description": bson.M{"$regex": query, "$options": "i"}},
+			{"tags": bson.M{"$in": []string{query}}},
+		}
+	}
+
+	if category != "" {
+		categoryID, _ := primitive.ObjectIDFromHex(category)
+		filter["categories"] = categoryID
+	}
+
+	// Add price range filter if provided
+	if minPrice != "" || maxPrice != "" {
+		priceFilter := bson.M{}
+		if minPrice != "" {
+			min, _ := strconv.ParseFloat(minPrice, 64)
+			priceFilter["$gte"] = min
+		}
+		if maxPrice != "" {
+			max, _ := strconv.ParseFloat(maxPrice, 64)
+			priceFilter["$lte"] = max
+		}
+		filter["priceUSD"] = priceFilter
+	}
+
+	var products []models.Product
+	cursor, err := database.DB.Collection("products").Find(c.Request().Context(), filter)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	defer cursor.Close(c.Request().Context())
+
+	if err = cursor.All(c.Request().Context(), &products); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, products)
+}
+
+// RateProduct adds a rating to a product
+func RateProduct(c echo.Context) error {
+	userID := c.Get("userID").(primitive.ObjectID)
+	productID, err := primitive.ObjectIDFromHex(c.Param("productId"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid product ID"})
+	}
+
+	var req struct {
+		Rating  float64 `json:"rating"`
+		Comment string  `json:"comment"`
+	}
+
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
+	}
+
+	rating := models.ProductRating{
+		UserID:    userID,
+		Rating:    req.Rating,
+		Comment:   req.Comment,
+		CreatedAt: time.Now(),
+	}
+
+	update := bson.M{
+		"$push": bson.M{"ratings": rating},
+		"$set":  bson.M{"updatedAt": time.Now()},
+	}
+
+	_, err = database.DB.Collection("products").UpdateOne(
+		c.Request().Context(),
+		bson.M{"_id": productID},
+		update,
+	)
+
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	// Update average rating
+	pipeline := []bson.M{
+		{"$match": bson.M{"_id": productID}},
+		{"$unwind": "$ratings"},
+		{"$group": bson.M{
+			"_id":       nil,
+			"avgRating": bson.M{"$avg": "$ratings.rating"},
+		}},
+	}
+
+	cursor, err := database.DB.Collection("products").Aggregate(c.Request().Context(), pipeline)
+	if err == nil {
+		var result struct {
+			AvgRating float64 `bson:"avgRating"`
+		}
+		if cursor.Next(c.Request().Context()) {
+			cursor.Decode(&result)
+			database.DB.Collection("products").UpdateOne(
+				c.Request().Context(),
+				bson.M{"_id": productID},
+				bson.M{"$set": bson.M{"avgRating": result.AvgRating}},
+			)
+		}
+	}
+
+	return c.JSON(http.StatusOK, rating)
 }

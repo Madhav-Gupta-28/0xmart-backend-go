@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/Madhav-Gupta-28/0xmart-backend-go/database"
@@ -14,11 +15,71 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type BlockchainEventListener struct {
-	client      *ethclient.Client
-	isListening bool
+	client            *ethclient.Client
+	isListening       bool
+	startTime         time.Time
+	lastEventTime     time.Time
+	reconnectAttempts int
+	lastError         string
+	failedEvents      []EventData
+	metrics           *ListenerMetrics
+	mu                sync.Mutex
+}
+
+type EventData struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty"`
+	Event      types.Log          `bson:"event"`
+	Timestamp  time.Time          `bson:"timestamp"`
+	RetryCount int                `bson:"retryCount"`
+}
+
+type ListenerMetrics struct {
+	ProcessedEvents    int64     `json:"processedEvents"`
+	FailedEvents       int64     `json:"failedEvents"`
+	ReconnectAttempts  int       `json:"reconnectAttempts"`
+	Uptime             string    `json:"uptime"`
+	LastEventProcessed time.Time `json:"lastEventProcessed"`
+}
+
+type HealthStatus struct {
+	IsHealthy         bool      `json:"isHealthy"`
+	LastEventTime     time.Time `json:"lastEventTime"`
+	Uptime            string    `json:"uptime"`
+	ReconnectAttempts int       `json:"reconnectAttempts"`
+	LastError         string    `json:"lastError,omitempty"`
+}
+
+func (b *BlockchainEventListener) GetHealth() HealthStatus {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return HealthStatus{
+		IsHealthy:         b.isListening && time.Since(b.lastEventTime) < 5*time.Minute,
+		LastEventTime:     b.lastEventTime,
+		Uptime:            time.Since(b.startTime).String(),
+		ReconnectAttempts: b.reconnectAttempts,
+		LastError:         b.lastError,
+	}
+}
+
+func (b *BlockchainEventListener) GetMetrics() *ListenerMetrics {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.metrics
+}
+
+func (b *BlockchainEventListener) GetFailedEvents() []EventData {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	events := make([]EventData, len(b.failedEvents))
+	copy(events, b.failedEvents)
+	return events
 }
 
 func NewBlockchainEventListener() *BlockchainEventListener {
