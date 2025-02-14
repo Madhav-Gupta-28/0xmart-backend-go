@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"math/big"
 	"net/http"
 	"strconv"
 	"time"
@@ -57,9 +58,28 @@ func GetProducts(c echo.Context) error {
 func CreateProduct(c echo.Context) error {
 	var product models.Product
 	if err := c.Bind(&product); err != nil {
-		return c.JSON(http.StatusBadRequest, err.Error())
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request format"})
 	}
 
+	// Validate and format price
+	if product.Price == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Price is required"})
+	}
+
+	// Convert price to Wei (multiply by 10^18)
+	priceFloat, ok := new(big.Float).SetString(product.Price)
+	if !ok {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid price format"})
+	}
+
+	multiplier := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	priceInWei := new(big.Float).Mul(priceFloat, multiplier)
+
+	priceInt, _ := priceInWei.Int(nil)
+	product.Price = priceInt.String()
+
+	// Generate new ObjectID for the product
+	product.ID = primitive.NewObjectID()
 	product.CreatedAt = time.Now()
 	product.UpdatedAt = time.Now()
 
@@ -69,7 +89,7 @@ func CreateProduct(c echo.Context) error {
 
 	_, err := collection.InsertOne(ctx, product)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, err.Error())
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to create product"})
 	}
 
 	return c.JSON(http.StatusCreated, product)

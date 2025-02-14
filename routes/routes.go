@@ -12,37 +12,33 @@ import (
 func SetupRoutes(e *echo.Echo) {
 	fmt.Println("Setting up routes...") // Debug log
 
-	// Public routes
+	// Public routes (no authentication required)
 	e.POST("/register", handlers.SignUp)
 	e.POST("/login", handlers.LoginUser)
-
-	// NextAuth routes (public)
 	e.POST("/api/auth/signup", handlers.SignUp)
-	fmt.Println("Registered /api/auth/signup route") // Debug log
 	e.POST("/api/auth/signin", handlers.NextAuthSignIn)
 	e.GET("/api/auth/csrf", handlers.NextAuthCSRF)
-	e.GET("/api/auth/session", handlers.NextAuthSession, customMiddleware.NextAuthMiddleware())
 
-	// Protected API routes
+	// Public Product routes
+	e.GET("/api/products", handlers.GetProducts)           // Make this public
+	e.GET("/api/products/:id", handlers.GetProduct)        // Make this public
+	e.GET("/api/products/search", handlers.SearchProducts) // Make this public
+
+	// Protected API routes (require authentication)
 	api := e.Group("/api")
 	api.Use(customMiddleware.NextAuthMiddleware())
 
-	fmt.Println("Routes setup complete") // Debug log
+	// Protected Product routes
+	api.POST("/products", handlers.CreateProduct) // Only creating products needs auth
+	api.POST("/products/:productId/ratings", handlers.RateProduct)
 
-	// User routes
+	// Protected User routes
 	api.GET("/users/me", handlers.GetUserProfile)
 	api.PUT("/users/me", handlers.UpdateUserProfile)
 	api.GET("/users/me/addresses", handlers.GetUserAddresses)
 	api.POST("/users/me/addresses", handlers.AddUserAddress)
 	api.PUT("/users/me/addresses/:id", handlers.UpdateUserAddress)
 	api.DELETE("/users/me/addresses/:id", handlers.DeleteUserAddress)
-
-	// Product routes
-	api.GET("/products", handlers.GetProducts)
-	api.GET("/products/:id", handlers.GetProduct)
-	api.POST("/products", handlers.CreateProduct)
-	// Polling route for order status
-	api.GET("/orders/:orderId/status", handlers.GetOrderStatus)
 
 	// Cart routes
 	api.GET("/cart", handlers.GetCart)
@@ -51,8 +47,11 @@ func SetupRoutes(e *echo.Echo) {
 	api.PUT("/cart/quantity", handlers.UpdateCartItemQuantity)
 
 	// Order routes
-	api.POST("/orders", handlers.CreateOrder)
-	api.POST("/orders/:orderId/payment", handlers.ProcessPayment)
+	api.GET("/orders", handlers.GetOrders)                        // Get all orders
+	api.GET("/orders/:orderId", handlers.GetOrder)                // Get single order
+	api.GET("/orders/:orderId/status", handlers.GetOrderStatus)   // Get order status
+	api.POST("/orders", handlers.CreateOrder)                     // Create order
+	api.POST("/orders/:orderId/payment", handlers.ProcessPayment) // Process payment
 
 	// Add this line in SetupRoutes
 	e.GET("/health", func(c echo.Context) error {

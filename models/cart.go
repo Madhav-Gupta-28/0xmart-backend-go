@@ -8,7 +8,7 @@ import (
 
 type CartItem struct {
 	ProductID primitive.ObjectID `bson:"productId" json:"productId"`
-	Size      ProductSize        `bson:"size" json:"size"`
+	Size      string             `bson:"size" json:"size"`
 	Quantity  int                `bson:"quantity" json:"quantity"`
 }
 

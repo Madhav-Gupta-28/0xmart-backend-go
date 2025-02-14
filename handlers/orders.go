@@ -23,18 +23,15 @@ type CreateOrderRequest struct {
 }
 
 func CreateOrder(c echo.Context) error {
+	userID := c.Get("userID").(primitive.ObjectID)
 	var req CreateOrderRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request format"})
 	}
 
-	if !common.IsHexAddress(req.WalletAddress) {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid wallet address"})
-	}
-
-	userID, ok := c.Get("userID").(primitive.ObjectID)
-	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "User not authenticated"})
+	// Make wallet address validation optional
+	if req.WalletAddress != "" && !common.IsHexAddress(req.WalletAddress) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid wallet address format"})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -68,16 +65,30 @@ func CreateOrder(c echo.Context) error {
 			})
 		}
 
+		// Convert string size to ProductSize
+		productSize := models.ProductSize(item.Size)
+
 		// Validate stock
-		if stock, ok := product.Stock[item.Size]; !ok || stock < item.Quantity {
+		if stock, ok := product.Stock[productSize]; !ok || stock < item.Quantity {
 			return c.JSON(http.StatusBadRequest, map[string]string{
 				"error": fmt.Sprintf("Insufficient stock for product %s size %s", product.Name, item.Size),
 			})
 		}
 
-		price, ok := new(big.Int).SetString(product.Price, 10)
+		// Parse the price (already in Wei)
+		price := new(big.Int)
+		price, ok := price.SetString(product.Price, 10)
 		if !ok {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Invalid product price format"})
+			// If parsing fails, try to convert it to Wei
+			priceFloat, ok := new(big.Float).SetString(product.Price)
+			if !ok {
+				return c.JSON(http.StatusInternalServerError, map[string]string{
+					"error": fmt.Sprintf("Invalid price format for product %s", product.Name),
+				})
+			}
+			multiplier := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+			priceInWei := new(big.Float).Mul(priceFloat, multiplier)
+			price, _ = priceInWei.Int(nil)
 		}
 
 		itemTotal := new(big.Int).Mul(price, big.NewInt(int64(item.Quantity)))
@@ -85,9 +96,9 @@ func CreateOrder(c echo.Context) error {
 
 		orderItems = append(orderItems, models.OrderItem{
 			ProductID: item.ProductID,
-			Size:      item.Size,
+			Size:      productSize,
 			Quantity:  item.Quantity,
-			Price:     product.Price,
+			Price:     price.String(),
 		})
 	}
 
@@ -231,3 +242,32 @@ func UpdateOrderFulfillment(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "updated"})
 }
+
+// GetOrder retrieves a specific order
+func GetOrder(c echo.Context) error {
+	userID := c.Get("userID").(primitive.ObjectID)
+	orderID, err := primitive.ObjectIDFromHex(c.Param("orderId"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid order ID"})
+	}
+
+	var order models.Order
+	err = database.DB.Collection("orders").FindOne(
+		c.Request().Context(),
+		bson.M{
+			"_id":    orderID,
+			"userId": userID, // Ensure user can only access their own orders
+		},
+	).Decode(&order)
+
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "Order not found"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to fetch order"})
+	}
+
+	return c.JSON(http.StatusOK, order)
+}
+
+// Update GetOrderStatus to be more detailed

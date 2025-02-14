@@ -51,6 +51,7 @@ func RegisterUser(c echo.Context) error {
 	user.ID = primitive.NewObjectID()
 	user.CreatedAt = time.Now()
 	user.UpdatedAt = time.Now()
+	user.Addresses = []models.Address{} // Initialize empty addresses array
 
 	_, err = collection.InsertOne(ctx, user)
 	if err != nil {
@@ -155,29 +156,76 @@ func UpdateUserProfile(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"message": "Profile updated successfully"})
 }
 
-// AddUserAddress adds a new address to the user's profile
+// AddUserAddress adds or updates an address
 func AddUserAddress(c echo.Context) error {
 	userID := c.Get("userID").(primitive.ObjectID)
 
 	var address models.Address
 	if err := c.Bind(&address); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid address data"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid address data: " + err.Error()})
 	}
 
-	address.ID = primitive.NewObjectID()
-
-	update := bson.M{
-		"$push": bson.M{"addresses": address},
-		"$set":  bson.M{"updatedAt": time.Now()},
+	// If no ID provided, create new one
+	if address.ID.IsZero() {
+		address.ID = primitive.NewObjectID()
 	}
 
+	if address.Type == "" {
+		address.Type = "shipping"
+	}
+
+	// First, remove any existing address with the same ID if it exists
 	_, err := database.DB.Collection("users").UpdateOne(
+		c.Request().Context(),
+		bson.M{"_id": userID},
+		bson.M{
+			"$pull": bson.M{
+				"addresses": bson.M{"_id": address.ID},
+			},
+		},
+	)
+
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update address: " + err.Error()})
+	}
+
+	// If this is set as default, unset others
+	if address.IsDefault {
+		_, err = database.DB.Collection("users").UpdateMany(
+			c.Request().Context(),
+			bson.M{"_id": userID},
+			bson.M{
+				"$set": bson.M{
+					"addresses.$[].isDefault": false,
+				},
+			},
+		)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update default status"})
+		}
+	}
+
+	// Add the new/updated address
+	update := bson.M{
+		"$push": bson.M{
+			"addresses": address,
+		},
+		"$set": bson.M{
+			"updatedAt": time.Now(),
+		},
+	}
+
+	result, err := database.DB.Collection("users").UpdateOne(
 		c.Request().Context(),
 		bson.M{"_id": userID},
 		update,
 	)
 
 	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to add address: " + err.Error()})
+	}
+
+	if result.ModifiedCount == 0 {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to add address"})
 	}
 
@@ -212,12 +260,54 @@ func UpdateUserAddress(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
 	}
 
-	address.ID = addressID
+	// First, check if address exists
+	var user models.User
+	err = database.DB.Collection("users").FindOne(
+		c.Request().Context(),
+		bson.M{
+			"_id": userID,
+			"addresses": bson.M{
+				"$elemMatch": bson.M{
+					"_id": addressID,
+				},
+			},
+		},
+	).Decode(&user)
 
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Address not found"})
+	}
+
+	// If this address is being set as default, unset others first
+	if address.IsDefault {
+		_, err = database.DB.Collection("users").UpdateOne(
+			c.Request().Context(),
+			bson.M{"_id": userID},
+			bson.M{
+				"$set": bson.M{
+					"addresses.$[].isDefault": false,
+				},
+			},
+		)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update default status"})
+		}
+	}
+
+	// Update the specific address
 	update := bson.M{
 		"$set": bson.M{
-			"addresses.$[elem]": address,
-			"updatedAt":         time.Now(),
+			"addresses.$[elem]": bson.M{
+				"_id":        addressID,
+				"type":       address.Type,
+				"street":     address.Street,
+				"city":       address.City,
+				"state":      address.State,
+				"country":    address.Country,
+				"postalCode": address.PostalCode,
+				"isDefault":  address.IsDefault,
+			},
+			"updatedAt": time.Now(),
 		},
 	}
 
@@ -235,16 +325,45 @@ func UpdateUserAddress(c echo.Context) error {
 	)
 
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update address"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to update address: " + err.Error()})
 	}
 
 	if result.MatchedCount == 0 {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "Address not found"})
 	}
 
+	if result.ModifiedCount == 0 {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "No changes made to address"})
+	}
+
+	// Fetch and return the updated address
+	err = database.DB.Collection("users").FindOne(
+		c.Request().Context(),
+		bson.M{
+			"_id": userID,
+			"addresses": bson.M{
+				"$elemMatch": bson.M{
+					"_id": addressID,
+				},
+			},
+		},
+	).Decode(&user)
+
+	if err != nil {
+		return c.JSON(http.StatusOK, map[string]string{"message": "Address updated successfully"})
+	}
+
+	// Find the updated address in the user's addresses
+	for _, addr := range user.Addresses {
+		if addr.ID == addressID {
+			return c.JSON(http.StatusOK, addr)
+		}
+	}
+
 	return c.JSON(http.StatusOK, map[string]string{"message": "Address updated successfully"})
 }
 
+// DeleteUserAddress deletes an address
 func DeleteUserAddress(c echo.Context) error {
 	userID := c.Get("userID").(primitive.ObjectID)
 	addressID, err := primitive.ObjectIDFromHex(c.Param("id"))
@@ -268,11 +387,11 @@ func DeleteUserAddress(c echo.Context) error {
 	)
 
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to delete address"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to delete address: " + err.Error()})
 	}
 
 	if result.ModifiedCount == 0 {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "Address not found"})
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Address not found or already deleted"})
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "Address deleted successfully"})
